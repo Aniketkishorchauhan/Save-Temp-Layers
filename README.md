@@ -1,22 +1,24 @@
 # Save Temp Layers
 
-A QGIS plugin to save all temporary/memory layers to disk with one click.
+A QGIS plugin to save selected temporary layers into a single GeoPackage.
 
 ## Description
 
 When working with QGIS Processing tools, results are often stored as temporary
 (in-memory) layers that disappear when you close the project. This plugin detects
-all such temporary layers and lets you save them permanently in one click.
+temporary layers and saves the selected ones into one GeoPackage.
 
 **Supported layer types:**
-- Vector layers (in-memory) → GeoPackage, Shapefile, or GeoJSON
-- Raster layers (stored in system temp folder) → GeoTIFF
+- Vector layers (in-memory) → separate feature tables in the GeoPackage
+- Raster layers (stored in the system temp folder) → separate raster tables in the GeoPackage
 
 ## Features
 
 - One-click detection of all temporary layers in the current project
 - Checkbox list to select which layers to save
-- Choose output format: GeoPackage / Shapefile / GeoJSON (vector), GeoTIFF (raster)
+- Save all selected vector and raster layers into one GeoPackage file
+- Store each layer as its own GeoPackage table, with unique table names
+- Repoint each successfully saved project layer to its GeoPackage table
 - Progress bar with success/failure summary
 - Option to open the output folder after saving
 
@@ -40,13 +42,33 @@ all such temporary layers and lets you save them permanently in one click.
    or go to **Plugins → Save Temp Layers → Save Temporary Layers**
 3. In the dialog:
    - Check/uncheck the layers you want to save
-   - Select your preferred output format
-   - Choose an output folder
+   - Choose the output `.gpkg` file
 4. Click **Save Selected Layers**
+
+Vector layers are written as feature tables. Raster layers are written as
+GeoPackage raster tables (subdatasets), using lossless PNG tiles for byte data
+and 16-bit integer data, and TIFF tiles for Float32 data. GeoPackage raster
+tables support Byte, Int16, UInt16, and Float32; unsupported types are reported
+instead of being silently converted. If the chosen file already exists, the
+plugin asks before replacing it.
+
+After each selected layer is saved successfully, its project data source is
+updated to point to the corresponding GeoPackage table. If that source change
+cannot be validated, the original source is left unchanged and the failure is
+included in the results.
+
+## Running integration tests
+
+On Windows with QGIS installed through OSGeo4W, run
+`tests\run_qgis_tests.bat`. Set `OSGEO4W_ROOT` if QGIS is installed outside
+`C:\OSGeo4W`. The headless tests use the QGIS LTR Python runtime and verify
+GeoPackage table layout and exact byte, 16-bit integer, and Float32 raster
+values.
 
 ## Requirements
 
 - QGIS 3.0 or later
+- GeoPackage raster support from the GDAL version bundled with QGIS
 - No additional Python dependencies required
 
 ## License

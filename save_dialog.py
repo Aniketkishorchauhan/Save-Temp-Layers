@@ -1,17 +1,17 @@
 import os
+import re
 
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFileDialog, QComboBox, QListWidget, QListWidgetItem,
-    QLineEdit, QCheckBox, QProgressBar, QMessageBox, QGroupBox,
-    QSizePolicy, QAbstractItemView
+    QFileDialog, QListWidget, QListWidgetItem,
+    QLineEdit, QProgressBar, QMessageBox, QGroupBox, QAbstractItemView
 )
-from qgis.PyQt.QtCore import Qt, QSize
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont, QColor
 
 from qgis.core import (
-    QgsVectorFileWriter, QgsRasterFileWriter, QgsMapLayer,
-    QgsRasterPipe, QgsProject, QgsCoordinateTransformContext
+    Qgis, QgsDataProvider, QgsVectorFileWriter, QgsRasterFileWriter, QgsMapLayer,
+    QgsRasterPipe, QgsProject, QgsRasterLayer, QgsVectorLayer
 )
 
 
@@ -33,7 +33,7 @@ class SaveTempLayersDialog(QDialog):
         layout.setContentsMargins(14, 14, 14, 14)
 
         # ── Title ──────────────────────────────────────────────────────────
-        title = QLabel("Save Temporary Layers to Disk")
+        title = QLabel("Save Temporary Layers to One GeoPackage")
         font = QFont()
         font.setBold(True)
         font.setPointSize(11)
@@ -42,7 +42,8 @@ class SaveTempLayersDialog(QDialog):
 
         subtitle = QLabel(
             f"Found <b>{len(self.temp_layers)}</b> temporary layer(s) in this project. "
-            "Select the ones you want to save."
+            "Select the ones you want to save. Vector layers are stored as feature "
+            "tables and raster layers as raster tables in the same GeoPackage."
         )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -71,31 +72,14 @@ class SaveTempLayersDialog(QDialog):
         list_layout.addWidget(self.layer_list)
         layout.addWidget(list_group)
 
-        # ── Format options ─────────────────────────────────────────────────
-        fmt_group = QGroupBox("Output Format")
-        fmt_layout = QHBoxLayout(fmt_group)
-
-        fmt_layout.addWidget(QLabel("Vector:"))
-        self.vec_format = QComboBox()
-        self.vec_format.addItems(["GeoPackage (.gpkg)", "Shapefile (.shp)", "GeoJSON (.geojson)"])
-        fmt_layout.addWidget(self.vec_format)
-
-        fmt_layout.addSpacing(20)
-        fmt_layout.addWidget(QLabel("Raster:"))
-        self.ras_format = QComboBox()
-        self.ras_format.addItems(["GeoTIFF (.tif)"])
-        fmt_layout.addWidget(self.ras_format)
-        fmt_layout.addStretch()
-        layout.addWidget(fmt_group)
-
-        # ── Output folder ──────────────────────────────────────────────────
-        out_group = QGroupBox("Output Folder")
+        # ── Output GeoPackage ──────────────────────────────────────────────
+        out_group = QGroupBox("Output GeoPackage")
         out_layout = QHBoxLayout(out_group)
-        self.folder_edit = QLineEdit()
-        self.folder_edit.setPlaceholderText("Choose a folder where files will be saved…")
+        self.file_edit = QLineEdit()
+        self.file_edit.setPlaceholderText("Choose the GeoPackage file to create…")
         browse_btn = QPushButton("Browse…")
-        browse_btn.clicked.connect(self._browse_folder)
-        out_layout.addWidget(self.folder_edit)
+        browse_btn.clicked.connect(self._browse_file)
+        out_layout.addWidget(self.file_edit)
         out_layout.addWidget(browse_btn)
         layout.addWidget(out_group)
 
@@ -158,10 +142,17 @@ class SaveTempLayersDialog(QDialog):
         for i in range(self.layer_list.count()):
             self.layer_list.item(i).setCheckState(Qt.Unchecked)
 
-    def _browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
-        if folder:
-            self.folder_edit.setText(folder)
+    def _browse_file(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select Output GeoPackage",
+            "temporary_layers.gpkg",
+            "GeoPackage (*.gpkg)"
+        )
+        if path:
+            if not path.lower().endswith(".gpkg"):
+                path += ".gpkg"
+            self.file_edit.setText(path)
 
     def _checked_layers(self):
         layers = []
@@ -174,9 +165,19 @@ class SaveTempLayersDialog(QDialog):
     # ─────────────────────────────────────────────────── Save ─────────────
 
     def _save_layers(self):
-        output_dir = self.folder_edit.text().strip()
-        if not output_dir:
-            QMessageBox.warning(self, "No Folder Selected", "Please choose an output folder first.")
+        output_path = self.file_edit.text().strip()
+        if not output_path:
+            QMessageBox.warning(self, "No File Selected", "Please choose an output GeoPackage first.")
+            return
+        if not output_path.lower().endswith(".gpkg"):
+            output_path += ".gpkg"
+        output_path = os.path.abspath(output_path)
+        self.file_edit.setText(output_path)
+        output_dir = os.path.dirname(output_path)
+        if os.path.isdir(output_path):
+            QMessageBox.warning(
+                self, "Invalid Output File", f"The output path is a folder:\n{output_path}"
+            )
             return
         if not os.path.isdir(output_dir):
             QMessageBox.warning(self, "Invalid Folder", f"The folder does not exist:\n{output_dir}")
@@ -187,20 +188,34 @@ class SaveTempLayersDialog(QDialog):
             QMessageBox.warning(self, "Nothing Selected", "Please select at least one layer to save.")
             return
 
+        if os.path.exists(output_path):
+            reply = QMessageBox.question(
+                self,
+                "Replace GeoPackage",
+                f"The file already exists:\n{output_path}\n\n"
+                "Replace it? All data currently in this file will be removed.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+            try:
+                os.remove(output_path)
+            except OSError as e:
+                QMessageBox.critical(
+                    self,
+                    "Could Not Replace GeoPackage",
+                    f"Could not remove the existing file:\n{e}"
+                )
+                return
+
         self.save_btn.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setMaximum(len(selected))
         self.progress.setValue(0)
 
-        # Format mappings
-        vec_map = {
-            "GeoPackage (.gpkg)": ("GPKG", ".gpkg"),
-            "Shapefile (.shp)":   ("ESRI Shapefile", ".shp"),
-            "GeoJSON (.geojson)": ("GeoJSON", ".geojson"),
-        }
-        vec_driver, vec_ext = vec_map[self.vec_format.currentText()]
-
         saved, failed = [], []
+        used_names = set()
 
         for idx, layer in enumerate(selected):
             self.status_label.setText(f"Saving: {layer.name()}…")
@@ -209,17 +224,24 @@ class SaveTempLayersDialog(QDialog):
             from qgis.PyQt.QtWidgets import QApplication
             QApplication.processEvents()
 
-            safe_name = self._safe_filename(layer.name())
+            table_name = self._unique_layer_name(layer.name(), used_names)
             try:
                 if layer.type() == QgsMapLayer.VectorLayer:
-                    out_path = os.path.join(output_dir, safe_name + vec_ext)
-                    self._save_vector(layer, out_path, vec_driver)
+                    self._save_vector(layer, output_path, table_name)
                 else:
-                    out_path = os.path.join(output_dir, safe_name + ".tif")
-                    self._save_raster(layer, out_path)
-                saved.append(layer.name())
+                    self._save_raster(layer, output_path, table_name)
             except Exception as e:
                 failed.append(f"{layer.name()}: {e}")
+                continue
+
+            try:
+                self._change_data_source(layer, output_path, table_name)
+                saved.append(f"{layer.name()} (table: {table_name})")
+            except Exception as e:
+                failed.append(
+                    f"{layer.name()}: saved to table '{table_name}', but could not "
+                    f"change its data source: {e}"
+                )
 
         self.progress.setValue(len(selected))
         self.save_btn.setEnabled(True)
@@ -227,7 +249,10 @@ class SaveTempLayersDialog(QDialog):
         # ── Result summary ──────────────────────────────────────────────
         msg = []
         if saved:
-            msg.append(f"✅ Successfully saved {len(saved)} layer(s):\n  • " + "\n  • ".join(saved))
+            msg.append(
+                f"✅ Successfully saved and updated {len(saved)} layer(s):\n  • "
+                + "\n  • ".join(saved)
+            )
         if failed:
             msg.append(f"❌ Failed ({len(failed)}):\n  • " + "\n  • ".join(failed))
 
@@ -238,7 +263,8 @@ class SaveTempLayersDialog(QDialog):
             reply = QMessageBox.question(
                 self,
                 "Save Complete",
-                f"{result_text}\n\nWould you like to open the output folder?",
+                f"{result_text}\n\nSaved to:\n{output_path}\n\n"
+                "Would you like to open the output folder?",
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
@@ -250,10 +276,15 @@ class SaveTempLayersDialog(QDialog):
                 else:
                     subprocess.Popen(["xdg-open", output_dir])
 
-    def _save_vector(self, layer, out_path, driver):
+    def _save_vector(self, layer, out_path, table_name):
         options = QgsVectorFileWriter.SaveVectorOptions()
-        options.driverName = driver
+        options.driverName = "GPKG"
         options.fileEncoding = "UTF-8"
+        options.layerName = table_name
+        if os.path.exists(out_path):
+            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+        else:
+            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
 
         transform_context = QgsProject.instance().transformContext()
         error, msg, _, _ = QgsVectorFileWriter.writeAsVectorFormatV3(
@@ -262,14 +293,43 @@ class SaveTempLayersDialog(QDialog):
         if error != QgsVectorFileWriter.NoError:
             raise RuntimeError(msg)
 
-    def _save_raster(self, layer, out_path):
+    def _save_raster(self, layer, out_path, table_name):
         provider = layer.dataProvider()
+        data_type = provider.dataType(1)
+        supported_types = (
+            Qgis.DataType.Byte,
+            Qgis.DataType.Int16,
+            Qgis.DataType.UInt16,
+            Qgis.DataType.Float32,
+        )
+        if data_type not in supported_types:
+            raise RuntimeError(
+                "GeoPackage raster tables only support Byte, Int16, UInt16, and "
+                f"Float32 data; this layer uses {data_type.name}."
+            )
+
         pipe = QgsRasterPipe()
         if not pipe.set(provider.clone()):
             raise RuntimeError("Failed to create raster pipe.")
 
         writer = QgsRasterFileWriter(out_path)
-        writer.setOutputFormat("GTiff")
+        writer.setOutputFormat("GPKG")
+        tile_format = (
+            "PNG"
+            if data_type in (
+                Qgis.DataType.Byte,
+                Qgis.DataType.Int16,
+                Qgis.DataType.UInt16,
+            )
+            else "TIFF"
+        )
+        create_options = [
+            f"RASTER_TABLE={table_name}",
+            f"TILE_FORMAT={tile_format}",
+        ]
+        if os.path.exists(out_path):
+            create_options.append("APPEND_SUBDATASET=YES")
+        writer.setCreateOptions(create_options)
         error = writer.writeRaster(
             pipe,
             provider.xSize(),
@@ -281,9 +341,48 @@ class SaveTempLayersDialog(QDialog):
             raise RuntimeError(f"Raster write error code: {error}")
 
     @staticmethod
-    def _safe_filename(name):
-        """Convert layer name to a safe filename."""
-        import re
-        safe = re.sub(r'[\\/*?:"<>|]', "_", name)
-        safe = safe.strip(". ")
-        return safe or "layer"
+    def _change_data_source(layer, gpkg_path, table_name):
+        if layer.type() == QgsMapLayer.VectorLayer:
+            data_source = f"{gpkg_path}|layername={table_name}"
+            provider_key = "ogr"
+            layer_class = QgsVectorLayer
+        else:
+            data_source = f"GPKG:{gpkg_path}:{table_name}"
+            provider_key = "gdal"
+            layer_class = QgsRasterLayer
+
+        candidate = layer_class(data_source, layer.name(), provider_key)
+        if not candidate.isValid():
+            raise RuntimeError(
+                f"GeoPackage table could not be opened as a {provider_key} layer."
+            )
+
+        layer.setDataSource(
+            data_source,
+            layer.name(),
+            provider_key,
+            QgsDataProvider.ProviderOptions(),
+        )
+        if not layer.isValid():
+            error = layer.error().summary()
+            raise RuntimeError(
+                f"Could not open the saved GeoPackage table: {error}"
+            )
+        QgsProject.instance().setDirty(True)
+
+    @staticmethod
+    def _unique_layer_name(name, used_names):
+        """Return a unique, portable GeoPackage table name."""
+        safe = re.sub(r"\W+", "_", name, flags=re.UNICODE).strip("_")
+        if not safe:
+            safe = "layer"
+        if safe[0].isdigit() or safe.lower().startswith(("gpkg_", "sqlite_", "rtree_")):
+            safe = "layer_" + safe
+
+        candidate = safe
+        suffix = 2
+        while candidate.casefold() in used_names:
+            candidate = f"{safe}_{suffix}"
+            suffix += 1
+        used_names.add(candidate.casefold())
+        return candidate
