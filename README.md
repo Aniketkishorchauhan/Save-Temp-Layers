@@ -18,6 +18,7 @@ temporary layers and saves the selected ones into one GeoPackage.
 - Checkbox list to select which layers to save
 - Save all selected vector and raster layers into one GeoPackage file
 - Store each layer as its own GeoPackage table, with unique table names
+- Repoint each successfully saved project layer to its GeoPackage table
 - Progress bar with success/failure summary
 - Option to open the output folder after saving
 
@@ -50,6 +51,11 @@ and 16-bit integer data, and TIFF tiles for Float32 data. GeoPackage raster
 tables support Byte, Int16, UInt16, and Float32; unsupported types are reported
 instead of being silently converted. If the chosen file already exists, the
 plugin asks before replacing it.
+
+After each selected layer is saved successfully, its project data source is
+updated to point to the corresponding GeoPackage table. If that source change
+cannot be validated, the original source is left unchanged and the failure is
+included in the results.
 
 ## Running integration tests
 

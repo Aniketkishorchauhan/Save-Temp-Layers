@@ -10,8 +10,8 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont, QColor
 
 from qgis.core import (
-    Qgis, QgsVectorFileWriter, QgsRasterFileWriter, QgsMapLayer,
-    QgsRasterPipe, QgsProject
+    Qgis, QgsDataProvider, QgsVectorFileWriter, QgsRasterFileWriter, QgsMapLayer,
+    QgsRasterPipe, QgsProject, QgsRasterLayer, QgsVectorLayer
 )
 
 
@@ -230,9 +230,18 @@ class SaveTempLayersDialog(QDialog):
                     self._save_vector(layer, output_path, table_name)
                 else:
                     self._save_raster(layer, output_path, table_name)
-                saved.append(f"{layer.name()} (table: {table_name})")
             except Exception as e:
                 failed.append(f"{layer.name()}: {e}")
+                continue
+
+            try:
+                self._change_data_source(layer, output_path, table_name)
+                saved.append(f"{layer.name()} (table: {table_name})")
+            except Exception as e:
+                failed.append(
+                    f"{layer.name()}: saved to table '{table_name}', but could not "
+                    f"change its data source: {e}"
+                )
 
         self.progress.setValue(len(selected))
         self.save_btn.setEnabled(True)
@@ -240,7 +249,10 @@ class SaveTempLayersDialog(QDialog):
         # ── Result summary ──────────────────────────────────────────────
         msg = []
         if saved:
-            msg.append(f"✅ Successfully saved {len(saved)} layer(s):\n  • " + "\n  • ".join(saved))
+            msg.append(
+                f"✅ Successfully saved and updated {len(saved)} layer(s):\n  • "
+                + "\n  • ".join(saved)
+            )
         if failed:
             msg.append(f"❌ Failed ({len(failed)}):\n  • " + "\n  • ".join(failed))
 
@@ -327,6 +339,36 @@ class SaveTempLayersDialog(QDialog):
         )
         if error != QgsRasterFileWriter.NoError:
             raise RuntimeError(f"Raster write error code: {error}")
+
+    @staticmethod
+    def _change_data_source(layer, gpkg_path, table_name):
+        if layer.type() == QgsMapLayer.VectorLayer:
+            data_source = f"{gpkg_path}|layername={table_name}"
+            provider_key = "ogr"
+            layer_class = QgsVectorLayer
+        else:
+            data_source = f"GPKG:{gpkg_path}:{table_name}"
+            provider_key = "gdal"
+            layer_class = QgsRasterLayer
+
+        candidate = layer_class(data_source, layer.name(), provider_key)
+        if not candidate.isValid():
+            raise RuntimeError(
+                f"GeoPackage table could not be opened as a {provider_key} layer."
+            )
+
+        layer.setDataSource(
+            data_source,
+            layer.name(),
+            provider_key,
+            QgsDataProvider.ProviderOptions(),
+        )
+        if not layer.isValid():
+            error = layer.error().summary()
+            raise RuntimeError(
+                f"Could not open the saved GeoPackage table: {error}"
+            )
+        QgsProject.instance().setDirty(True)
 
     @staticmethod
     def _unique_layer_name(name, used_names):

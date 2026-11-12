@@ -9,10 +9,12 @@ import numpy
 from osgeo import gdal, osr
 from qgis.core import (
     QgsApplication,
+    QgsDataProvider,
     QgsFeature,
     QgsGeometry,
     QgsPointXY,
     QgsRasterLayer,
+    QgsProject,
     QgsVectorLayer,
 )
 
@@ -24,7 +26,16 @@ gdal.DontUseExceptions()
 QgsApplication.setPrefixPath(os.environ["QGIS_PREFIX_PATH"], True)
 QGIS_APP = QgsApplication([], False)
 QGIS_APP.initQgis()
-atexit.register(QGIS_APP.exitQgis)
+DEFERRED_TEMP_DIRS = []
+
+
+def _shutdown_qgis():
+    QGIS_APP.exitQgis()
+    for temp_dir in DEFERRED_TEMP_DIRS:
+        temp_dir.cleanup()
+
+
+atexit.register(_shutdown_qgis)
 
 
 class GeoPackageExportTest(unittest.TestCase):
@@ -34,9 +45,28 @@ class GeoPackageExportTest(unittest.TestCase):
         self.layers = []
 
     def tearDown(self):
+        for layer in self.layers:
+            if layer.providerType() == "ogr":
+                layer.setDataSource(
+                    "Point?crs=EPSG:4326",
+                    layer.name(),
+                    "memory",
+                    QgsDataProvider.ProviderOptions(),
+                )
+            else:
+                layer.setDataSource(
+                    "",
+                    layer.name(),
+                    layer.providerType(),
+                    QgsDataProvider.ProviderOptions(),
+                )
+            del layer
         self.layers.clear()
         gc.collect()
-        self.temp_dir.cleanup()
+        try:
+            self.temp_dir.cleanup()
+        except PermissionError:
+            DEFERRED_TEMP_DIRS.append(self.temp_dir)
 
     def _create_vector_layer(self, name):
         layer = QgsVectorLayer(
@@ -49,6 +79,7 @@ class GeoPackageExportTest(unittest.TestCase):
         feature.setAttributes(["sample"])
         feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(1, 2)))
         self.assertTrue(layer.dataProvider().addFeatures([feature])[0])
+        self.layers.append(layer)
         return layer
 
     def _create_raster_layer(self, name, data_type, values):
@@ -73,6 +104,11 @@ class GeoPackageExportTest(unittest.TestCase):
 
     def _save_raster(self, layer, table_name):
         SaveTempLayersDialog._save_raster(None, layer, self.gpkg_path, table_name)
+
+    def _change_data_source(self, layer, table_name):
+        SaveTempLayersDialog._change_data_source(
+            layer, self.gpkg_path, table_name
+        )
 
     def _contents(self):
         with sqlite3.connect(self.gpkg_path) as connection:
@@ -123,6 +159,56 @@ class GeoPackageExportTest(unittest.TestCase):
         self._assert_vector_table("roads")
         values, _ = self._read_raster("elevation")
         self.assertEqual(values.tolist(), [[1, 2], [3, 4]])
+
+    def test_vector_layer_uses_saved_geopackage_after_export(self):
+        layer = self._create_vector_layer("roads")
+        self._save_vector(layer, "roads")
+        QgsProject.instance().setDirty(False)
+
+        self._change_data_source(layer, "roads")
+
+        self.assertTrue(layer.isValid(), layer.dataProvider().error().summary())
+        self.assertEqual(layer.providerType(), "ogr")
+        self.assertEqual(layer.featureCount(), 1)
+        feature = next(layer.getFeatures())
+        self.assertEqual(feature["name"], "sample")
+        self.assertEqual(layer.source(), f"{self.gpkg_path}|layername=roads")
+        self.assertTrue(QgsProject.instance().isDirty())
+
+    def test_failed_vector_source_change_keeps_original_source(self):
+        layer = self._create_vector_layer("roads")
+        original_source = layer.source()
+        QgsProject.instance().setDirty(False)
+
+        with self.assertRaisesRegex(RuntimeError, "GeoPackage table could not be opened"):
+            SaveTempLayersDialog._change_data_source(
+                layer,
+                os.path.join(self.temp_dir.name, "missing.gpkg"),
+                "roads",
+            )
+
+        self.assertTrue(layer.isValid())
+        self.assertEqual(layer.source(), original_source)
+        self.assertFalse(QgsProject.instance().isDirty())
+
+    def test_raster_layer_uses_saved_geopackage_after_export(self):
+        expected = numpy.array([[1, 2], [3, 4]], dtype="uint8")
+        layer = self._create_raster_layer("elevation", gdal.GDT_Byte, expected)
+        self._save_raster(layer, "elevation")
+
+        self._change_data_source(layer, "elevation")
+
+        self.assertTrue(layer.isValid(), layer.error().summary())
+        self.assertEqual(layer.providerType(), "gdal")
+        self.assertEqual(
+            layer.source(),
+            f"GPKG:{self.gpkg_path}:elevation",
+        )
+        block = layer.dataProvider().block(1, layer.extent(), 2, 2)
+        self.assertEqual(
+            [[block.value(row, column) for column in range(2)] for row in range(2)],
+            expected.tolist(),
+        )
 
     def test_float_raster_values_are_preserved(self):
         expected = numpy.array([[1.25, -2.5], [3.75, 4.5]], dtype="float32")
