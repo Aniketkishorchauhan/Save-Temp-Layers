@@ -10,7 +10,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont, QColor
 
 from qgis.core import (
-    QgsVectorFileWriter, QgsRasterFileWriter, QgsMapLayer,
+    Qgis, QgsVectorFileWriter, QgsRasterFileWriter, QgsMapLayer,
     QgsRasterPipe, QgsProject
 )
 
@@ -283,13 +283,38 @@ class SaveTempLayersDialog(QDialog):
 
     def _save_raster(self, layer, out_path, table_name):
         provider = layer.dataProvider()
+        data_type = provider.dataType(1)
+        supported_types = (
+            Qgis.DataType.Byte,
+            Qgis.DataType.Int16,
+            Qgis.DataType.UInt16,
+            Qgis.DataType.Float32,
+        )
+        if data_type not in supported_types:
+            raise RuntimeError(
+                "GeoPackage raster tables only support Byte, Int16, UInt16, and "
+                f"Float32 data; this layer uses {data_type.name}."
+            )
+
         pipe = QgsRasterPipe()
         if not pipe.set(provider.clone()):
             raise RuntimeError("Failed to create raster pipe.")
 
         writer = QgsRasterFileWriter(out_path)
         writer.setOutputFormat("GPKG")
-        create_options = [f"RASTER_TABLE={table_name}", "TILE_FORMAT=PNG"]
+        tile_format = (
+            "PNG"
+            if data_type in (
+                Qgis.DataType.Byte,
+                Qgis.DataType.Int16,
+                Qgis.DataType.UInt16,
+            )
+            else "TIFF"
+        )
+        create_options = [
+            f"RASTER_TABLE={table_name}",
+            f"TILE_FORMAT={tile_format}",
+        ]
         if os.path.exists(out_path):
             create_options.append("APPEND_SUBDATASET=YES")
         writer.setCreateOptions(create_options)

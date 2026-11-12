@@ -45,9 +45,19 @@ temporary layers and saves the selected ones into one GeoPackage.
 4. Click **Save Selected Layers**
 
 Vector layers are written as feature tables. Raster layers are written as
-GeoPackage raster tables (subdatasets), using PNG tiles to avoid lossy JPEG
-compression for byte rasters. If the chosen file already exists, the plugin
-asks before replacing it.
+GeoPackage raster tables (subdatasets), using lossless PNG tiles for byte data
+and 16-bit integer data, and TIFF tiles for Float32 data. GeoPackage raster
+tables support Byte, Int16, UInt16, and Float32; unsupported types are reported
+instead of being silently converted. If the chosen file already exists, the
+plugin asks before replacing it.
+
+## Running integration tests
+
+On Windows with QGIS installed through OSGeo4W, run
+`tests\run_qgis_tests.bat`. Set `OSGEO4W_ROOT` if QGIS is installed outside
+`C:\OSGeo4W`. The headless tests use the QGIS LTR Python runtime and verify
+GeoPackage table layout and exact byte, 16-bit integer, and Float32 raster
+values.
 
 ## Requirements
 
